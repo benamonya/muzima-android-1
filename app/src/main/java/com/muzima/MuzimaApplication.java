@@ -15,6 +15,9 @@ import android.app.ActivityManager;
 import android.content.SharedPreferences;
 import android.os.Build;
 import android.preference.PreferenceManager;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import android.util.Base64;
 import android.util.Log;
 
 import androidx.multidex.MultiDexApplication;
@@ -64,11 +67,18 @@ import com.muzima.view.preferences.MuzimaTimer;
 
 import java.io.File;
 import java.io.IOException;
+import java.security.KeyStore;
 import java.security.Security;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 
 import static com.muzima.view.preferences.MuzimaTimer.getTimer;
 
@@ -102,6 +112,7 @@ public class MuzimaApplication extends MultiDexApplication {
     private static final String APP_DIR = "/data/data/com.muzima";
     private SntpService sntpService;
     private User authenticatedUser;
+    private byte[] iv;
 
     public void clearApplicationData() {
         try {
@@ -145,8 +156,37 @@ public class MuzimaApplication extends MultiDexApplication {
         super.onCreate();
         checkAndSetLocaleToDeviceLocaleIFDisclaimerNotAccepted();
         try {
-            ContextFactory.setProperty(Constants.LUCENE_DIRECTORY_PATH, APP_DIR);
-            muzimaContext = ContextFactory.createContext();
+            String appKey1 = PreferenceManager.getDefaultSharedPreferences(this)
+                    .getString(getResources().getString(R.string.preference_key),null);
+
+            if(appKey1 != null) {
+                KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+                keyStore.load(null);
+                final KeyStore.SecretKeyEntry secretKeyEntry = (KeyStore.SecretKeyEntry) keyStore
+                        .getEntry("muzima", null);
+
+                final SecretKey secretKey1 = secretKeyEntry.getSecretKey();
+
+                byte[] keyBytes = Base64.decode(appKey1, Base64.DEFAULT);
+
+
+                String app = PreferenceManager.getDefaultSharedPreferences(this)
+                        .getString(getResources().getString(R.string.preference_iv), null);
+                byte[] ivval = Base64.decode(app, Base64.DEFAULT);
+
+                final Cipher cipher1 = Cipher.getInstance("AES/GCM/NoPadding");
+                final GCMParameterSpec spec = new GCMParameterSpec(128, ivval);
+                cipher1.init(Cipher.DECRYPT_MODE, secretKey1, spec);
+
+                byte[] biy = cipher1.doFinal(keyBytes);
+
+                ContextFactory.setProperty(Constants.LUCENE_DIRECTORY_PATH, APP_DIR);
+                muzimaContext = ContextFactory.createContext(new String(biy, "UTF-8"), android.os.Build.VERSION.SDK_INT);
+
+            }else{
+                ContextFactory.setProperty(Constants.LUCENE_DIRECTORY_PATH, APP_DIR);
+                muzimaContext = ContextFactory.createContext(null, android.os.Build.VERSION.SDK_INT);
+            }
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -157,6 +197,39 @@ public class MuzimaApplication extends MultiDexApplication {
         String disclaimerKey = getResources().getString(R.string.preference_disclaimer);
         boolean disclaimerAccepted = settings.getBoolean(disclaimerKey, false);
         if (!disclaimerAccepted) {
+            final KeyGenerator keyGenerator;
+            final SecretKey secretKey;
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                    keyGenerator = KeyGenerator
+                            .getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+                    final KeyGenParameterSpec keyGenParameterSpec = new KeyGenParameterSpec.Builder("muzima",
+                            KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                            .build();
+                    keyGenerator.init(keyGenParameterSpec);
+                    secretKey = keyGenerator.generateKey();
+
+                    final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                    cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+                    String name = cipher.getProvider().getName();
+                    iv = cipher.getIV();
+
+                    String ivValue = getResources().getString(R.string.preference_iv);
+                    settings.edit().putString(ivValue, Base64.encodeToString(iv, Base64.DEFAULT)).commit();
+
+                    String uuid = UUID.randomUUID().toString();
+
+                    byte[] encryptedKey = cipher.doFinal(uuid.getBytes("UTF-8"));
+                    String encryptedString = Base64.encodeToString(encryptedKey,Base64.DEFAULT);
+
+                    String appKey = getResources().getString(R.string.preference_key);
+                    settings.edit().putString(appKey, encryptedString).commit();
+                }
+            }catch (Exception e) {
+                e.printStackTrace();
+            }
             String localeKey = getResources().getString(R.string.preference_app_language);
             settings.edit().putString(localeKey, Locale.getDefault().getLanguage()).commit();
         }
